@@ -19,5 +19,5 @@ git switch -c lessonNN upstream/lessonNN-start   # NN はコマ番号（例: 08�
 - 使い終わったら Codespace を**停止**する。
 
 ## メモ
-
+コマ2
 （ここに自分用のメモを書いてよい）
