@@ -30,6 +30,8 @@
 // コマ11で追加したもの
 //   - アプリ設定: AUTH_SIGNING_KEY（利用者トークンの署名の鍵。Key Vault 参照）、DEV_LOGIN_ENABLED（擬似認証の入口。既定は false）
 //   - 画面の認証（Static Web Apps の組み込み認証）は、app/public/staticwebapp.config.json で設定する（ここには書かない）
+//
+// コマ12: 構成の変更はない（ツールを使うアシスタントの API が増え、ツールが問い合わせのデータを読み書きするだけ）
 // =====================================================================
 param location string
 param webLocation string

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import Assistant from './Assistant.jsx'
+import ToolAssistant from './ToolAssistant.jsx'
 import SignIn from './SignIn.jsx'
 import { apiFetch, getSession } from './api.js'
 
@@ -176,6 +177,7 @@ export default function App() {
               <span>{new Date(item.createdAt).toLocaleString('ja-JP')}</span>
               {item.assignee && <span>担当: {item.assignee}</span>}
             </div>
+            <div className="item-id">ID: {item.id}</div>
             {/* React は文字列を自動でエスケープして表示する（XSS 対策。2年次に学んだ内容） */}
             <strong>{item.title}</strong>
             <p>{item.body}</p>
@@ -200,6 +202,9 @@ export default function App() {
           </li>
         ))}
       </ul>
+
+      {/* ツールを使うアシスタント（コマ12）。ツールが問い合わせを変えたら、一覧を読み直す */}
+      <ToolAssistant key={`tool-${user?.id ?? 'none'}`} user={user} onChanged={load} />
 
       {/* key を利用者の ID にして、利用者を切り替えたらアシスタントの表示を作り直す */}
       <Assistant key={user?.id ?? 'none'} user={user} />

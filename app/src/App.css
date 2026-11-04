@@ -241,3 +241,34 @@ select {
 .conversation-list button.current {
   outline: 2px solid #3b6ea5;
 }
+
+/* ===== ツールを使うアシスタント（コマ12） ===== */
+.item-id {
+  font-size: 0.8em;
+  color: #777;
+  font-family: Consolas, monospace;
+}
+
+.tool-steps {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+  font-size: 0.9em;
+}
+
+.tool-step {
+  background: #f7f7f7;
+  border: 1px solid #d8dee6;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.tool-step code {
+  font-family: Consolas, monospace;
+  font-size: 0.95em;
+  word-break: break-all;
+}
+
+.tool-step.error {
+  border-color: #b3261e;
+}

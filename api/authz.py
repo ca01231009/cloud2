@@ -46,9 +46,8 @@ def require_user(principal):
 def require_role(principal, role):
     """サインインしていて、さらに role のロールを持つことを求める（ロールが足りなければ Forbidden）"""
     require_user(principal)
-    # TODO(コマ11 演習手順6): ロールを確かめる。
-    #   principal.roles に role が含まれていなければ、Forbidden("この操作は担当者だけができる") を出す。
-    #   いまは、サインインさえしていれば、誰でも担当者の操作（AI での分類・一括分類のジョブ）ができる。
+    if role not in principal.roles:
+        raise Forbidden("この操作は担当者だけができる")
 
 
 def check_owner(principal, owner_id):
@@ -57,6 +56,5 @@ def check_owner(principal, owner_id):
       owner_id : データの所有者の利用者 ID（データが存在しなければ None）
     """
     require_user(principal)
-    # TODO(コマ11 演習手順5): 所有者を確かめる。
-    #   owner_id が principal.user_id と等しくなければ（None のときも）、NotFound("会話が見つからない") を出す。
-    #   いまは、何も確かめていない。会話の ID さえ分かれば、他人の会話も読める・続きを書ける。
+    if owner_id != principal.user_id:
+        raise NotFound("会話が見つからない")

@@ -1,7 +1,8 @@
-"""言語モデル（LLM）を呼ぶ部分（コマ7〜9。教員が用意したもの）
+"""言語モデル（LLM）を呼ぶ部分（コマ7〜9・12。教員が用意したもの）
 
 コマ9で「プロバイダ」の形に整理した。
-  プロバイダ = LLM の呼び先。同じ形の関数（complete_json・stream_chat）を持つ。
+  プロバイダ = LLM の呼び先。同じ形の関数（complete_json・stream_chat・complete_tools）を持つ。
+  complete_tools（コマ12）は、ツールの定義を渡して1回呼び、答えの文か、ツールの要求（tool_calls）を返す。
     MockProvider        : モックLLM（既定）。OpenRouter を呼ばない。共有の利用上限を消費しない
     OpenRouterProvider  : OpenRouter の本物のモデル。教員の合図があったときだけ使う
   呼ぶ側（function_app.py・resilience.py）は、どちらのプロバイダかを気にしなくてよい。
@@ -17,8 +18,10 @@
 """
 
 import hashlib
+import itertools
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -65,6 +68,19 @@ def model_candidates(config=None):
     return [m for m in names if m.endswith(":free") and not m.startswith(PLACEHOLDER_PREFIX)]
 
 
+def tool_model_candidates(config=None):
+    """ツール呼び出しに使ってよいモデル（コマ12）
+
+    ツール呼び出しに対応したモデルは限られるので、チャットとは別に設定する（tool_model）。
+    許可するのは、ここでも無料モデル（:free で終わるもの）だけ。
+    """
+    config = config or load_config()
+    names = [config["tool_model"]] + list(config.get("tool_fallback_models", []))
+    if provider_name() == "mock":
+        return names
+    return [m for m in names if m.endswith(":free") and not m.startswith(PLACEHOLDER_PREFIX)]
+
+
 def get_provider():
     if provider_name() == "openrouter":
         return OpenRouterProvider()
@@ -99,6 +115,10 @@ _MOCK_RULES = [
 # rate_limit_once で「この要求は1回目か」を覚えておく（このインスタンスの中だけ）
 _seen_requests = set()
 
+# ツールの要求の ID を作る（モック。本物のモデルも、要求ごとに ID を付けて返す）
+_call_ids = itertools.count(1)
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
 
 class MockProvider:
     """モックLLM。アプリ設定 MOCK_FAULT で、わざと失敗させられる
@@ -111,6 +131,10 @@ class MockProvider:
       rate_limit_once : 同じ要求の1回目だけ、429（Retry-After: 2秒）で失敗する
       primary_down    : 主のモデルだけ、毎回 503 で失敗する（フォールバックのモデルは動く）
       all_rate_limited: どのモデルも、毎回 429（Retry-After: 2秒）で失敗する
+    ツール呼び出しの失敗（コマ12）
+      bad_tool_args   : ステータスの変更で、決まりにない値（「解決済み」）を引数に入れる
+      unknown_tool    : 定義にないツール（delete_inquiry）を要求する
+      tool_loop       : ツールの結果を受け取っても、同じ検索を要求し続ける（止まらない）
     """
 
     def __init__(self):
@@ -180,6 +204,78 @@ class MockProvider:
             # 構造化出力を使わないモデルがよくやる返し方（前置きの文と、コードブロック）をまねる
             return f"分類結果は次のとおりです。\n```json\n{body}\n```"
         return body
+
+
+    def complete_tools(self, model, messages, tools, max_tokens):
+        """ツール呼び出しのモック（コマ12）。利用者の文から、決まった規則でツールを選ぶ
+
+          - 「…」で囲んだ言葉があり、「探して」「検索」などがあれば → search_inquiries
+          - 問い合わせの ID（UUID）と「対応中」「完了」があれば → update_inquiry_status
+          - 最後のメッセージがツールの結果なら → 結果をまとめた答えの文を返す
+        """
+        self._maybe_fail(model, messages)
+        _check_tool_messages(model, messages)
+        names = {t["function"]["name"] for t in tools}
+        last = messages[-1]
+        if last["role"] == "tool":
+            if self.fault == "tool_loop":
+                return _mock_call("search_inquiries", {"keyword": "VPN"})
+            return {"content": _mock_summary(messages), "tool_calls": []}
+
+        text = last["content"]
+        if self.fault == "unknown_tool":
+            return _mock_call("delete_inquiry", {"inquiry_id": "00000000-0000-0000-0000-000000000000"})
+        found = _UUID.search(text)
+        if found and "update_inquiry_status" in names:
+            status = "完了" if "完了" in text else "対応中" if "対応中" in text else None
+            if self.fault == "bad_tool_args":
+                status = "解決済み"
+            if status:
+                return _mock_call("update_inquiry_status", {"inquiry_id": found.group(0), "status": status})
+        quoted = re.search(r"「(.+?)」", text)
+        if quoted and any(w in text for w in ("探", "検索", "調べ", "一覧", "ある")) and "search_inquiries" in names:
+            return _mock_call("search_inquiries", {"keyword": quoted.group(1)[:50]})
+        return {
+            "content": "（モックLLMの応答）ツールを使わずに答える。問い合わせを探すときは、言葉を「」で囲んで"
+            "「探して」と書く。ステータスを変えるときは、問い合わせの ID と「対応中」か「完了」を書く。",
+            "tool_calls": [],
+        }
+
+
+def _check_tool_messages(model, messages):
+    """本物の API と同じく、tool_calls の後には、すべての要求に対応する tool のメッセージが必要"""
+    for i, m in enumerate(messages):
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            answered = {x.get("tool_call_id") for x in messages[i + 1 :] if x["role"] == "tool"}
+            if any(c["id"] not in answered for c in m["tool_calls"]):
+                raise LLMError(f"モデルを呼べなかった（HTTP 400・モック・{model}: ツールの要求に対応する結果がない）")
+
+
+def _mock_call(name, arguments):
+    return {
+        "content": None,
+        "tool_calls": [
+            {"id": f"call_mock_{next(_call_ids)}", "name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}
+        ],
+    }
+
+
+def _mock_summary(messages):
+    """ツールの結果（最後の利用者の発言より後の tool のメッセージ）をまとめて、答えの文にする"""
+    start = max(i for i, m in enumerate(messages) if m["role"] == "user")
+    parts = []
+    for m in messages[start + 1 :]:
+        if m["role"] != "tool":
+            continue
+        result = json.loads(m["content"])
+        if "error" in result:
+            parts.append(f"ツールがエラーを返した（{result['error']}）")
+        elif "items" in result:
+            titles = "、".join(f"{i['title']}（{i['status']}）" for i in result["items"])
+            parts.append(f"{result['count']} 件見つかった: {titles}" if result["items"] else "見つからなかった")
+        elif "after" in result:
+            parts.append(f"「{result['title']}」のステータスを {result['before']} から {result['after']} にした")
+    return "（モックLLMの応答）" + " ／ ".join(parts)
 
 
 # =====================================================================
@@ -271,3 +367,32 @@ class OpenRouterProvider:
             # 状態コードが 200 でも、本文がエラーで中身がないことがある（提供元の途中の失敗）
             raise TransientLLMError(f"モデルの応答が空だった（{model}）")
         return response.choices[0].message.content or ""
+
+    def complete_tools(self, model, messages, tools, max_tokens):
+        """ツールの定義を渡して1回呼ぶ（コマ12）。答えの文か、ツールの要求を返す"""
+        from openai import OpenAIError
+
+        client = self._client(model)
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,  # ツールの定義は、要求のたびに渡す（API は前の要求を覚えていない）
+                tool_choice="auto",  # ツールを使うかどうかは、モデルに任せる
+                max_tokens=max_tokens,
+                temperature=0,
+                # ツール呼び出しに対応した提供元だけに送ってもらう（OpenRouter の機能）
+                extra_body={"provider": {"require_parameters": True}},
+            )
+        except OpenAIError as e:
+            raise _translate_error(e, model) from e
+        if not response.choices:
+            raise TransientLLMError(f"モデルの応答が空だった（{model}）")
+        message = response.choices[0].message
+        return {
+            "content": message.content,
+            "tool_calls": [
+                {"id": c.id, "name": c.function.name, "arguments": c.function.arguments or "{}"}
+                for c in (message.tool_calls or [])
+            ],
+        }

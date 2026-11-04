@@ -20,9 +20,7 @@ def list_conversations(store, principal, requested_user=None):
       requested_user : 画面が送ってきた「誰の一覧か」（クエリ文字列の user）
     """
     authz.require_user(principal)
-    # TODO(コマ11 演習手順5): 画面が送ってきた requested_user を信じず、トークンで確かめた本人（principal.user_id）の一覧を返す。
-    #   いまは、user に他人の ID を書けば、他人の会話の一覧が見える。
-    user_id = requested_user or principal.user_id
+    user_id = principal.user_id  # 画面が送ってきた requested_user は使わない
     return store.list_for_user(user_id)
 
 

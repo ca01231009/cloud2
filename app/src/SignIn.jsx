@@ -77,7 +77,7 @@ export default function SignIn({ onChange }) {
         </select>
       </label>
       {testUsers.length === 0 && (
-        <p className="hint">テスト利用者を読み込めません（lesson11/enable-dev-login.sh を実行したか確かめる）</p>
+        <p className="hint">テスト利用者を読み込めません（そのコマのフォルダの enable-dev-login.sh を実行したか確かめる）</p>
       )}
       {error && <p className="message">{error}</p>}
     </section>

@@ -16,5 +16,11 @@
   "max_job_items": 20,
   "history_token_budget": 1500,
   "max_history_messages": 40,
+  "tool_model": "google/gemma-4-31b-it:free",
+  "tool_fallback_models": [],
+  "max_tool_steps": 4,
+  "max_tool_llm_calls": 6,
+  "tool_max_output_tokens": 400,
+  "tool_system_prompt": "あなたはカモメ物産（架空の会社）の問い合わせ管理のアシスタントである。日本語で、簡潔に答える。問い合わせを探すときは search_inquiries を、ステータスを変えるときは update_inquiry_status を使う。ステータスを変える前に、対象の問い合わせを search_inquiries で確かめる。ツールの結果にないことは答えない。ツールがエラーを返したら、その内容を利用者に伝える。",
   "system_prompt": "あなたはカモメ物産（架空の会社）の社内問い合わせ窓口のアシスタントである。日本語で、簡潔に、丁寧に答える。分からないことは分からないと答える。"
 }

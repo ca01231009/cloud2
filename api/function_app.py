@@ -12,6 +12,7 @@
                         {"conversationId": "...（省略すると新しい会話）", "message": "..."}
   GET  /api/conversations?id=...  会話の履歴を返す（コマ7。画面を開き直したときに使う）
   GET  /api/conversations/list?user=...  会話の一覧を返す（コマ11）
+  POST /api/assist      ツールを使うアシスタント（コマ12。問い合わせの検索・ステータスの変更）  {"message": "..."}
   POST /api/inquiries/classify?id=...  問い合わせを AI で分類し、担当に振り分ける（コマ8）
                         コマ9から、キャッシュ・再試行・フォールバック・呼ぶ回数の上限を加えた
   POST /api/jobs/classify  未対応の問い合わせをまとめて分類するジョブを始める（コマ10。すぐ 202 を返す）
@@ -52,6 +53,7 @@ import jobs
 import llm
 import llm_cache
 import resilience
+import tools
 from history import trim_history
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
@@ -94,7 +96,7 @@ def authenticate(req):
     """要求のトークンを確かめ、利用者（auth.Principal）を返す。確かめられなければ authz.AuthError を出す"""
     key = auth.signing_key()
     if key is None:
-        raise authz.NotReady("トークンの署名の鍵が設定されていない（lesson11/enable-dev-login.sh を実行する）")
+        raise authz.NotReady("トークンの署名の鍵が設定されていない（そのコマのフォルダの enable-dev-login.sh を実行する）")
     return authz.require_user(auth.principal_from_headers(req.headers, key, time.time()))
 
 
@@ -135,7 +137,7 @@ async def dev_login(req: Request) -> JSONResponse:
         return JSONResponse({"error": "見つからない"}, status_code=404)
     key = auth.signing_key()
     if key is None:
-        return auth_error(authz.NotReady("トークンの署名の鍵が設定されていない（lesson11/enable-dev-login.sh を実行する）"))
+        return auth_error(authz.NotReady("トークンの署名の鍵が設定されていない（そのコマのフォルダの enable-dev-login.sh を実行する）"))
     try:
         data = await req.json()
     except ValueError:
@@ -467,6 +469,75 @@ async def classify_inquiry(req: Request) -> JSONResponse:
             **info,
         }
     )
+
+
+# =====================================================================
+# ツールを使うアシスタント（コマ12）
+# =====================================================================
+def run_assist(message, principal, config):
+    """ツールの実行ループを動かす。モデルを呼ぶたびに、コマ9の再試行・フォールバックと、呼ぶ回数の上限を使う"""
+    models = llm.tool_model_candidates(config)
+    if not models:
+        raise llm.LLMError("ツール呼び出しに使うモデルが設定されていない（教員の指示を待つ）")
+    provider = llm.get_provider()
+    budget = resilience.CallBudget(config["max_tool_llm_calls"])  # ループ全体で、LLM を呼ぶ回数の上限
+    definitions = tools.tool_definitions(tools.TOOLS)
+    repo = tools.CosmosInquiryRepo(get_inquiries())
+    call_log = []
+    steps = []
+
+    def call_model(messages):
+        outcome = resilience.call_with_resilience(
+            lambda model: provider.complete_tools(model, messages, definitions, config["tool_max_output_tokens"]),
+            models,
+            budget,
+            max_retries_per_model=config["max_retries_per_model"],
+            base_delay=config["retry_base_delay_seconds"],
+            max_delay=config["retry_max_delay_seconds"],
+            max_wait=config["retry_max_wait_seconds"],
+            log=call_log,
+        )
+        return outcome.text  # complete_tools の戻り値（答えの文か、ツールの要求）
+
+    def execute(name, arguments):
+        # ツールは、モデルではなく「依頼した利用者」の権限で実行する（principal を渡す）
+        return tools.execute_tool(name, arguments, principal, repo)
+
+    messages = [
+        {"role": "system", "content": config["tool_system_prompt"]},
+        {"role": "user", "content": message},
+    ]
+    try:
+        reply, steps = tools.run_tool_loop(messages, call_model, execute, config["max_tool_steps"], steps)
+    except llm.LLMError as e:
+        e.call_log = call_log
+        e.steps = steps  # モデルを呼べなくなるまでに実行したツール（ツールの実行は取り消されない）
+        raise
+    return {"reply": reply, "steps": steps, "llmCalls": budget.used, "callLog": call_log}
+
+
+@app.route(route="assist", methods=["POST"])
+async def assist(req: Request) -> JSONResponse:
+    try:
+        principal = authenticate(req)
+    except authz.AuthError as e:
+        return auth_error(e)
+    try:
+        data = await req.json()
+    except ValueError:
+        return JSONResponse({"error": "JSON の形式が正しくない"}, status_code=400)
+    message = str(data.get("message", "")).strip()
+    if not message or len(message) > MAX_MESSAGE:
+        return JSONResponse({"error": "依頼が空か、長すぎる"}, status_code=400)
+
+    config = llm.load_config()
+    try:
+        result = await asyncio.to_thread(run_assist, message, principal, config)
+    except llm.LLMError as e:
+        return JSONResponse(
+            {"error": str(e), "callLog": getattr(e, "call_log", []), "steps": getattr(e, "steps", [])}, status_code=503
+        )
+    return JSONResponse(result)
 
 
 # =====================================================================
