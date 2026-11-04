@@ -9,11 +9,11 @@
 
 | 問い | 記入 |
 |------|------|
-| `app/public/staticwebapp.config.json` で、サインインしていない人が画面を開くと何が起きるか | |
-| `api/auth.py` の `verify_token` が確かめている3つのこと | |
-| `api/function_app.py` で、トークンを確かめずに呼べる API（2つ以上） | |
-| `api/function_app.py` の `list_inquiries` で、担当者とそれ以外で返すものの違い | |
-| `api/conversations.py` で、会話の所有者をどう決めているか（`owner_of`） | |
+| `app/public/staticwebapp.config.json` で、サインインしていない人が画面を開くと何が起きるか | app/public/staticwebapp.config.json: 画面へのアクセスの制限（ガイダンスの 2.2）|
+| `api/auth.py` の `verify_token` が確かめている3つのこと | api/auth.py: 冒頭のコメント、issue_token・verify_token・principal_from_headers・signing_key。|
+| `api/function_app.py` で、トークンを確かめずに呼べる API（2つ以上） | api/authz.py: 例外と状態コードの対応、require_role・check_owner（TODO(コマ11 …) が2か所）。|
+| `api/function_app.py` の `list_inquiries` で、担当者とそれ以外で返すものの違い | api/conversations.py: list_conversations（TODO(コマ11 …) が1か所）・read_conversation・check_can_continue・CosmosConversationStore。|
+| `api/conversations.py` で、会話の所有者をどう決めているか（`owner_of`） | api/function_app.py: 「認証（コマ11）」の authenticate・dev_login・me、list_inquiries、get_conversation・list_conversations・chat、classify_inquiry の最初の数行。|
 
 ## 2. 認証を確かめる（開始状態のまま）
 
