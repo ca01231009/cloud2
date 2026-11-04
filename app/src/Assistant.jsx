@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
+import { apiFetch } from './api.js'
 
 // アシスタントの画面（コマ7。教員が用意したもの）
 //   - 質問を API（/api/chat）に送り、応答を「少しずつ」受け取って表示する
 //   - 会話の ID をブラウザに覚えておき、画面を開き直したら API から履歴を読み直す
 //   - キーはここ（ブラウザ）には一切ない。ブラウザが知っているのは自分の API の URL だけ
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
-const STORAGE_KEY = 'cloud2-conversation-id'
+// コマ11から
+//   - 要求にテスト利用者のトークンを付ける（apiFetch）。覚えておく会話の ID も、利用者ごとに分ける
+//   - 自分の会話の一覧（/api/conversations/list）を表示し、選んだ会話を開く
 
 // SSE（text/event-stream）の本文を読み、イベント（JSON）を1つずつ onEvent に渡す
 async function readEvents(response, onEvent) {
@@ -29,8 +30,10 @@ async function readEvents(response, onEvent) {
   }
 }
 
-export default function Assistant() {
+export default function Assistant({ user }) {
+  const STORAGE_KEY = `cloud2-conversation-id-${user?.id ?? 'none'}`
   const [conversationId, setConversationId] = useState(() => localStorage.getItem(STORAGE_KEY))
+  const [list, setList] = useState([]) // 自分の会話の一覧（コマ11）
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -38,13 +41,33 @@ export default function Assistant() {
   const [error, setError] = useState('')
   const startedAt = useRef(0)
 
+  // 会話の一覧を読む。画面は「自分の ID」を user として送っている（API がこれを信じてよいかは、コマ11の演習で考える）
+  async function loadList() {
+    if (!user) return
+    const res = await apiFetch(`/api/conversations/list?user=${encodeURIComponent(user.id)}`)
+    setList(res.ok ? await res.json() : [])
+  }
+
+  // 会話を開く: 履歴を API から読む
+  async function openConversation(id) {
+    setError('')
+    setInfo('')
+    const res = await apiFetch(`/api/conversations?id=${encodeURIComponent(id)}`)
+    if (!res.ok) {
+      setMessages([])
+      setError(`会話の履歴を読めませんでした（HTTP ${res.status}）`)
+      return
+    }
+    localStorage.setItem(STORAGE_KEY, id)
+    setConversationId(id)
+    setMessages(await res.json())
+  }
+
   // 画面を開いたとき: 覚えている会話があれば、履歴を API から読み直す
   useEffect(() => {
-    if (!conversationId) return
-    fetch(`${API_BASE_URL}/api/conversations?id=${encodeURIComponent(conversationId)}`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((items) => setMessages(items))
-      .catch(() => setError('会話の履歴を読めませんでした'))
+    if (!user) return
+    loadList()
+    if (conversationId) openConversation(conversationId).catch(() => setError('会話の履歴を読めませんでした'))
   }, [])
 
   function newConversation() {
@@ -80,7 +103,7 @@ export default function Assistant() {
     let firstAt = 0
 
     try {
-      const res = await fetch(`${API_BASE_URL}/api/chat`, {
+      const res = await apiFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ conversationId, message: question }),
@@ -101,6 +124,7 @@ export default function Assistant() {
           setInfo((prev) => `${prev} ／ 最初の文字まで ${first} 秒・全体 ${total} 秒`)
         }
       })
+      await loadList()
     } catch (err) {
       setError(`応答を受け取れませんでした（${err.message}）`)
     } finally {
@@ -116,6 +140,26 @@ export default function Assistant() {
           新しい会話
         </button>
       </div>
+
+      {!user && <p className="hint">上の「API に送る利用者」で、テスト利用者を選ぶと使えます。</p>}
+
+      {list.length > 0 && (
+        <div className="conversation-list">
+          自分の会話:
+          {list.map((c) => (
+            <button
+              key={c.conversationId}
+              type="button"
+              className={`secondary small ${c.conversationId === conversationId ? 'current' : ''}`}
+              onClick={() => openConversation(c.conversationId)}
+              disabled={busy}
+              title={c.conversationId}
+            >
+              {c.title}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="chat-log">
         {messages.length === 0 && <p className="hint">社内の手続きなどについて質問できます（架空の会社の設定です）。</p>}
@@ -136,9 +180,9 @@ export default function Assistant() {
           onChange={(e) => setInput(e.target.value)}
           maxLength={1000}
           placeholder="質問を入力（架空の内容だけ）"
-          disabled={busy}
+          disabled={busy || !user}
         />
-        <button type="submit" disabled={busy}>
+        <button type="submit" disabled={busy || !user}>
           {busy ? '応答中…' : '送信'}
         </button>
       </form>

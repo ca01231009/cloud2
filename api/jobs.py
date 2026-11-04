@@ -89,8 +89,12 @@ def summarize(header, results):
             counts[r["status"]] += 1
     finished = sum(counts.values())
 
-    # TODO(コマ10 演習手順4): state を決める。いまは、いつも "queued" を返している。
-    state = "queued"
+    if finished >= header["total"]:
+        state = "completed"
+    elif finished > 0:
+        state = "running"
+    else:
+        state = "queued"
 
     return {
         "jobId": header["jobId"],
@@ -131,20 +135,15 @@ def process_message(body, store, classify_one, now):
 
     existing = store.get_result(job_id, inquiry_id)
 
-    # TODO(コマ10 演習手順5): 冪等にする。
-    #   existing があり、その status が FINISHED のどれかなら、もう分類は終わっている。
-    #   分類し直さずに、store.add_duplicate(job_id, inquiry_id) で重複として数え、"skipped" を返す。
-    #   いまは、同じメッセージが2回届くと、2回とも分類している（LLM を2回呼ぶ）。
+    if existing and existing["status"] in FINISHED:
+        store.add_duplicate(job_id, inquiry_id)
+        return "skipped"
 
     processed = (existing or {}).get("processed", 0) + 1
 
-    # TODO(コマ10 演習手順6): 失敗を「再実行しても直らないもの」と「待てば直るかもしれないもの」に分ける。
-    #   - InquiryGone（問い合わせがない）は、何度やっても直らない → "failed" として記録して、正常に終わる
-    #   - llm.LLMError（429 が続いた など）は、ここでは捕まえない → 例外のまま外へ出し、キューに再実行させる
-    #   いまは、どんな失敗も "failed" として記録して終わりにしている（キューの再実行が働かない）。
     try:
         status, detail = classify_one(inquiry_id)
-    except Exception as e:  # noqa: BLE001
+    except InquiryGone as e:
         store.save_result(result_doc(job_id, inquiry_id, FAILED, str(e), now, processed))
         return FAILED
 

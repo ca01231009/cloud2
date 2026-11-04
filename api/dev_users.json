@@ -1,0 +1,8 @@
+{
+  "_comment": "演習用のテスト利用者（架空の人物）。POST /api/dev/login で、パスワードなしでこの誰にでもなれる（本番では使わない）",
+  "users": [
+    {"id": "user-aoi", "name": "青井（一般の利用者）", "roles": []},
+    {"id": "user-kai", "name": "海野（一般の利用者）", "roles": []},
+    {"id": "staff-sora", "name": "空木（担当者）", "roles": ["staff"]}
+  ]
+}

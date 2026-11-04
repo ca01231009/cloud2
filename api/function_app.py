@@ -1,13 +1,17 @@
 """問い合わせ管理アプリの API（Azure Functions / Python）
 
 エンドポイント
-  GET  /api/health      動作確認
-  GET  /api/inquiries   問い合わせの一覧を返す（新しい順）
+  GET  /api/health      動作確認（サインイン不要）
+  GET  /api/dev/users   テスト利用者の一覧（コマ11。擬似認証。DEV_LOGIN_ENABLED=true のときだけ）
+  POST /api/dev/login   テスト利用者としてトークンを受け取る（コマ11。擬似認証）  {"userId": "..."}
+  GET  /api/me          API が「あなたは誰か」をどう認識したかを返す（コマ11）
+  GET  /api/inquiries   問い合わせの一覧を返す（新しい順。担当者は全件、それ以外は自分が登録したものだけ）
   POST /api/inquiries   問い合わせを1件登録する  {"title": "...", "body": "..."}
   GET  /api/ai/config-check  OpenRouter のキーが届いているかを確かめる（コマ6。値は返さない）
   POST /api/chat        アシスタントに質問する（コマ7。応答をストリーミングで返す）
                         {"conversationId": "...（省略すると新しい会話）", "message": "..."}
   GET  /api/conversations?id=...  会話の履歴を返す（コマ7。画面を開き直したときに使う）
+  GET  /api/conversations/list?user=...  会話の一覧を返す（コマ11）
   POST /api/inquiries/classify?id=...  問い合わせを AI で分類し、担当に振り分ける（コマ8）
                         コマ9から、キャッシュ・再試行・フォールバック・呼ぶ回数の上限を加えた
   POST /api/jobs/classify  未対応の問い合わせをまとめて分類するジョブを始める（コマ10。すぐ 202 を返す）
@@ -15,7 +19,9 @@
   （キュー トリガー）classify_worker・classify_poison  ジョブのメッセージを1件ずつ処理する（コマ10）
 
 接続先などの設定は、コードに書かずに「アプリ設定」（環境変数）から読む。
-注意: この時点では認証がなく、誰でも読み書きできる（コマ11で認証を加える）。
+
+コマ11から、health と dev/* 以外のすべての API で、利用者トークン（Authorization: Bearer …）を確かめる（auth.py）。
+分類・一括分類のジョブは、担当者（staff）のロールを持つ利用者だけに許す（authz.py）。
 
 コマ7から、応答を少しずつ返す「HTTP ストリーミング」を使う。
 Azure Functions（Python）では、ストリーミングを有効にすると、この関数アプリの
@@ -28,7 +34,9 @@ import hashlib
 import json
 import logging
 import os
+import time
 import uuid
+from pathlib import Path
 
 import azure.functions as func
 from azure.cosmos import CosmosClient
@@ -36,7 +44,10 @@ from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from azure.identity import DefaultAzureCredential
 from azurefunctions.extensions.http.fastapi import JSONResponse, Request, StreamingResponse
 
+import auth
+import authz
 import classification
+import conversations
 import jobs
 import llm
 import llm_cache
@@ -76,24 +87,109 @@ def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+# =====================================================================
+# 認証（コマ11）
+# =====================================================================
+def authenticate(req):
+    """要求のトークンを確かめ、利用者（auth.Principal）を返す。確かめられなければ authz.AuthError を出す"""
+    key = auth.signing_key()
+    if key is None:
+        raise authz.NotReady("トークンの署名の鍵が設定されていない（lesson11/enable-dev-login.sh を実行する）")
+    return authz.require_user(auth.principal_from_headers(req.headers, key, time.time()))
+
+
+def auth_error(e):
+    return JSONResponse({"error": e.message}, status_code=e.status)
+
+
+def dev_login_enabled():
+    return os.environ.get("DEV_LOGIN_ENABLED", "false").lower() == "true"
+
+
+def load_dev_users():
+    path = Path(__file__).with_name("dev_users.json")
+    return json.loads(path.read_text(encoding="utf-8"))["users"]
+
+
 @app.route(route="health", methods=["GET"])
 async def health(req: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "llmProvider": llm.provider_name()})
 
 
+@app.route(route="dev/users", methods=["GET"])
+async def dev_users(req: Request) -> JSONResponse:
+    """テスト利用者の一覧（擬似認証）。本番では、この API 自体を置かない"""
+    if not dev_login_enabled():
+        return JSONResponse({"error": "見つからない"}, status_code=404)
+    return JSONResponse([{"id": u["id"], "name": u["name"], "roles": u["roles"]} for u in load_dev_users()])
+
+
+@app.route(route="dev/login", methods=["POST"])
+async def dev_login(req: Request) -> JSONResponse:
+    """テスト利用者としてトークンを発行する（擬似認証）
+
+    パスワードも本人確認もなく、誰にでもなれる。だから「演習用」であり、本番では使ってはいけない。
+    本番では、ここが ID プロバイダー（GitHub・Microsoft Entra ID など）でのサインインに置き換わる。
+    """
+    if not dev_login_enabled():
+        return JSONResponse({"error": "見つからない"}, status_code=404)
+    key = auth.signing_key()
+    if key is None:
+        return auth_error(authz.NotReady("トークンの署名の鍵が設定されていない（lesson11/enable-dev-login.sh を実行する）"))
+    try:
+        data = await req.json()
+    except ValueError:
+        return JSONResponse({"error": "JSON の形式が正しくない"}, status_code=400)
+    user = next((u for u in load_dev_users() if u["id"] == data.get("userId")), None)
+    if user is None:
+        return JSONResponse({"error": "そのテスト利用者はいない"}, status_code=400)
+    token = auth.issue_token(user["id"], user["name"], user["roles"], key, time.time())
+    return JSONResponse({"token": token, "userId": user["id"], "name": user["name"], "roles": user["roles"]})
+
+
+@app.route(route="me", methods=["GET"])
+async def me(req: Request) -> JSONResponse:
+    """API が、この要求を「誰から」と認識したかを返す（トークンで確かめた結果だけを返す）"""
+    try:
+        principal = authenticate(req)
+    except authz.AuthError as e:
+        return auth_error(e)
+    return JSONResponse({"userId": principal.user_id, "name": principal.name, "roles": list(principal.roles)})
+
+
 @app.route(route="inquiries", methods=["GET"])
 async def list_inquiries(req: Request) -> JSONResponse:
-    query = (
-        "SELECT c.id, c.title, c.body, c.status, c.createdAt, "
-        "c.classification, c.assignee, c.classifyAttempts "
-        "FROM c ORDER BY c.createdAt DESC"
+    try:
+        principal = authenticate(req)
+    except authz.AuthError as e:
+        return auth_error(e)
+
+    fields = (
+        "SELECT c.id, c.title, c.body, c.status, c.createdAt, c.createdBy, "
+        "c.classification, c.assignee, c.classifyAttempts FROM c "
     )
-    items = list(get_inquiries().query_items(query=query, enable_cross_partition_query=True))
-    return JSONResponse(items)
+    if authz.STAFF in principal.roles:
+        # 担当者は、すべての問い合わせを見る
+        items = get_inquiries().query_items(
+            query=fields + "ORDER BY c.createdAt DESC", enable_cross_partition_query=True
+        )
+    else:
+        # それ以外の利用者は、自分が登録した問い合わせだけを見る（条件は、トークンで確かめた本人の ID）
+        items = get_inquiries().query_items(
+            query=fields + "WHERE c.createdBy = @user ORDER BY c.createdAt DESC",
+            parameters=[{"name": "@user", "value": principal.user_id}],
+            enable_cross_partition_query=True,
+        )
+    return JSONResponse(list(items))
 
 
 @app.route(route="inquiries", methods=["POST"])
 async def create_inquiry(req: Request) -> JSONResponse:
+    try:
+        principal = authenticate(req)
+    except authz.AuthError as e:
+        return auth_error(e)
+
     try:
         data = await req.json()
     except ValueError:
@@ -114,6 +210,7 @@ async def create_inquiry(req: Request) -> JSONResponse:
         "body": body,
         "status": "未対応",
         "createdAt": now_iso(),
+        "createdBy": principal.user_id,  # 登録した人。画面が送ってきた値ではなく、トークンで確かめた本人
     }
     get_inquiries().create_item(item)
     return JSONResponse(item, status_code=201)
@@ -166,49 +263,40 @@ def parse_conversation_id(value):
         return None
 
 
-def load_history(conversation_id, limit):
-    """この会話の履歴のうち、新しいほうから limit 件を、古い順に並べて返す"""
-    query = (
-        "SELECT TOP @limit c.role, c.content, c.createdAt FROM c "
-        "WHERE c.conversationId = @id ORDER BY c.createdAt DESC"
-    )
-    items = list(
-        get_conversations().query_items(
-            query=query,
-            parameters=[
-                {"name": "@limit", "value": limit},
-                {"name": "@id", "value": conversation_id},
-            ],
-            partition_key=conversation_id,  # 1つの会話は1つのパーティションに入っている
-        )
-    )
-    items.reverse()
-    return [{"role": i["role"], "content": i["content"]} for i in items]
-
-
-def save_message(conversation_id, role, content, created_at):
-    """メッセージ1件を Cosmos DB に保存する（1件＝1ドキュメント）"""
-    get_conversations().create_item(
-        {
-            "id": str(uuid.uuid4()),
-            "conversationId": conversation_id,
-            "role": role,
-            "content": content,
-            "createdAt": created_at,
-        }
-    )
+def get_conversation_store():
+    """会話の履歴の保存先（コマ11で conversations.py に移した。メッセージに所有者 userId を記録する）"""
+    return conversations.CosmosConversationStore(get_conversations())
 
 
 @app.route(route="conversations", methods=["GET"])
 async def get_conversation(req: Request) -> JSONResponse:
-    conversation_id = parse_conversation_id(req.query_params.get("id", ""))
-    if conversation_id is None:
-        return JSONResponse({"error": "会話の ID が正しくない"}, status_code=400)
-    return JSONResponse(load_history(conversation_id, 100))
+    try:
+        principal = authenticate(req)
+        conversation_id = parse_conversation_id(req.query_params.get("id", ""))
+        if conversation_id is None:
+            return JSONResponse({"error": "会話の ID が正しくない"}, status_code=400)
+        return JSONResponse(conversations.read_conversation(get_conversation_store(), principal, conversation_id, 100))
+    except authz.AuthError as e:
+        return auth_error(e)
+
+
+@app.route(route="conversations/list", methods=["GET"])
+async def list_conversations(req: Request) -> JSONResponse:
+    try:
+        principal = authenticate(req)
+        requested_user = req.query_params.get("user")  # 画面が送ってくる「誰の一覧か」
+        return JSONResponse(conversations.list_conversations(get_conversation_store(), principal, requested_user))
+    except authz.AuthError as e:
+        return auth_error(e)
 
 
 @app.route(route="chat", methods=["POST"])
 async def chat(req: Request) -> StreamingResponse:
+    try:
+        principal = authenticate(req)
+    except authz.AuthError as e:
+        return sse_response(iter([sse({"type": "error", "message": e.message})]), e.status)
+
     # 入力の検証。エラーも、ストリームの途中のエラーと同じ「イベント」の形で返す
     try:
         data = await req.json()
@@ -219,10 +307,15 @@ async def chat(req: Request) -> StreamingResponse:
     if not message or len(message) > MAX_MESSAGE:
         return sse_response(iter([sse({"type": "error", "message": "質問が空か、長すぎる"})]), 400)
 
+    store = get_conversation_store()
     if data.get("conversationId"):
         conversation_id = parse_conversation_id(data["conversationId"])
         if conversation_id is None:
             return sse_response(iter([sse({"type": "error", "message": "会話の ID が正しくない"})]), 400)
+        try:
+            conversations.check_can_continue(store, principal, conversation_id)  # 他人の会話に書き足させない
+        except authz.AuthError as e:
+            return sse_response(iter([sse({"type": "error", "message": e.message})]), e.status)
     else:
         conversation_id = str(uuid.uuid4())  # 新しい会話
 
@@ -230,7 +323,7 @@ async def chat(req: Request) -> StreamingResponse:
     budget = int(os.environ.get("HISTORY_TOKEN_BUDGET", config["history_token_budget"]))
     user_created_at = now_iso()
 
-    history = load_history(conversation_id, config["max_history_messages"])
+    history = store.load(conversation_id, config["max_history_messages"])
     history.append({"role": "user", "content": message})
     messages = [{"role": "system", "content": config["system_prompt"]}] + trim_history(history, budget)
 
@@ -249,8 +342,8 @@ async def chat(req: Request) -> StreamingResponse:
             yield sse({"type": "error", "message": str(e)})
             return
 
-        save_message(conversation_id, "user", message, user_created_at)
-        save_message(conversation_id, "assistant", reply, now_iso())
+        store.save_message(conversation_id, principal.user_id, "user", message, user_created_at)
+        store.save_message(conversation_id, principal.user_id, "assistant", reply, now_iso())
 
         yield sse({"type": "end"})
 
@@ -339,6 +432,11 @@ def structured_output_mode(config):
 
 @app.route(route="inquiries/classify", methods=["POST"])
 async def classify_inquiry(req: Request) -> JSONResponse:
+    try:
+        authz.require_role(authenticate(req), authz.STAFF)  # 担当者だけ（LLM を呼ぶ＝共有の利用上限を使う）
+    except authz.AuthError as e:
+        return auth_error(e)
+
     inquiry_id = parse_conversation_id(req.query_params.get("id", ""))  # 問い合わせの ID も UUID の形
     if inquiry_id is None:
         return JSONResponse({"error": "問い合わせの ID が正しくない"}, status_code=400)
@@ -394,6 +492,11 @@ def get_queue():
 @app.route(route="jobs/classify", methods=["POST"])
 async def start_classify_job(req: Request) -> JSONResponse:
     """未対応の問い合わせを、まとめて分類するジョブを始める。分類の完了は待たずに、すぐ返す"""
+    try:
+        authz.require_role(authenticate(req), authz.STAFF)
+    except authz.AuthError as e:
+        return auth_error(e)
+
     config = llm.load_config()
     query = "SELECT TOP @limit c.id FROM c WHERE c.status = '未対応' ORDER BY c.createdAt"
     targets = list(
@@ -421,6 +524,11 @@ async def start_classify_job(req: Request) -> JSONResponse:
 
 @app.route(route="jobs", methods=["GET"])
 async def get_job(req: Request) -> JSONResponse:
+    try:
+        authz.require_role(authenticate(req), authz.STAFF)
+    except authz.AuthError as e:
+        return auth_error(e)
+
     job_id = parse_conversation_id(req.query_params.get("id", ""))  # ジョブの ID も UUID の形
     if job_id is None:
         return JSONResponse({"error": "ジョブの ID が正しくない"}, status_code=400)

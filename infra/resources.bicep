@@ -26,6 +26,10 @@
 //   - Storage のキューに対するロールの割り当て（Functions のマネージドID・自分）
 //   - Cosmos DB のコンテナー jobs（非同期ジョブの状態）、アプリ設定: COSMOS_JOBS_CONTAINER
 //   - Functions の最大インスタンス数を 1 にした（同時に LLM を呼ぶ数を絞る。api/host.json の batchSize と合わせて）
+//
+// コマ11で追加したもの
+//   - アプリ設定: AUTH_SIGNING_KEY（利用者トークンの署名の鍵。Key Vault 参照）、DEV_LOGIN_ENABLED（擬似認証の入口。既定は false）
+//   - 画面の認証（Static Web Apps の組み込み認証）は、app/public/staticwebapp.config.json で設定する（ここには書かない）
 // =====================================================================
 param location string
 param webLocation string
@@ -42,6 +46,7 @@ var jobsContainerName = 'jobs'
 var jobQueueName = 'classify-jobs'
 var deploymentContainerName = 'deploymentpackage'
 var openRouterSecretName = 'openrouter-api-key'
+var authSigningKeySecretName = 'auth-signing-key' // 利用者トークンの署名の鍵（コマ11。値は lesson11/enable-dev-login.sh が書き込む）
 
 // 組み込みロールの ID（ロールの名前ではなく、Azure 全体で決まっている ID で指定する）
 var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6' // Key Vault Secrets User（シークレットを読む）
@@ -311,6 +316,16 @@ resource api 'Microsoft.Web/sites@2024-04-01' = {
         {
           name: 'OPENROUTER_API_KEY'
           value: '@Microsoft.KeyVault(VaultName=${keyVault.name};SecretName=${openRouterSecretName})'
+        }
+        // 利用者トークンの署名の鍵（コマ11）。値はコードにも Bicep にも書かず、Key Vault に置く
+        {
+          name: 'AUTH_SIGNING_KEY'
+          value: '@Microsoft.KeyVault(VaultName=${keyVault.name};SecretName=${authSigningKeySecretName})'
+        }
+        // 擬似認証の入口（POST /api/dev/login）を開くか（コマ11）。既定は閉じておき、演習のときだけ開く
+        {
+          name: 'DEV_LOGIN_ENABLED'
+          value: 'false'
         }
         // LLM の呼び先（mock: モックLLM／openrouter: 本物）。既定はモック（共有の利用上限を消費しない）
         {

@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import Assistant from './Assistant.jsx'
-
-// API の URL は、ビルドのときに azd が設定ファイル（.env.production.local）に書き込む
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
+import SignIn from './SignIn.jsx'
+import { apiFetch, getSession } from './api.js'
 
 export default function App() {
+  const [user, setUser] = useState(() => getSession()?.user ?? null) // API に送るテスト利用者（コマ11）
   const [items, setItems] = useState([])
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
@@ -15,7 +15,7 @@ export default function App() {
 
   async function load() {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/inquiries`)
+      const res = await apiFetch('/api/inquiries')
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setItems(await res.json())
     } catch (e) {
@@ -26,7 +26,7 @@ export default function App() {
   async function submit(e) {
     e.preventDefault()
     setMessage('')
-    const res = await fetch(`${API_BASE_URL}/api/inquiries`, {
+    const res = await apiFetch('/api/inquiries', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, body }),
@@ -46,7 +46,7 @@ export default function App() {
     setClassifying(id)
     setMessage('')
     try {
-      const res = await fetch(`${API_BASE_URL}/api/inquiries/classify?id=${encodeURIComponent(id)}`, {
+      const res = await apiFetch(`/api/inquiries/classify?id=${encodeURIComponent(id)}`, {
         method: 'POST',
       })
       const data = await res.json()
@@ -67,7 +67,7 @@ export default function App() {
   // 一括分類のジョブを始める（コマ10）。API は分類を待たずに、すぐジョブの ID を返す（202）
   async function startJob() {
     setMessage('')
-    const res = await fetch(`${API_BASE_URL}/api/jobs/classify`, { method: 'POST' })
+    const res = await apiFetch('/api/jobs/classify', { method: 'POST' })
     const data = await res.json()
     if (!res.ok) {
       setMessage(data.error ?? `ジョブを始められませんでした（HTTP ${res.status}）`)
@@ -81,7 +81,7 @@ export default function App() {
     if (!job || job.state === 'completed') return
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/api/jobs?id=${encodeURIComponent(job.jobId)}`)
+        const res = await apiFetch(`/api/jobs?id=${encodeURIComponent(job.jobId)}`)
         const data = await res.json()
         if (res.ok) {
           setJob(data)
@@ -94,13 +94,19 @@ export default function App() {
     return () => clearTimeout(timer)
   }, [job])
 
+  // テスト利用者を切り替えたら、その人として一覧を読み直す（コマ11）
   useEffect(() => {
+    setMessage('')
+    setLastResult(null)
+    setJob(null)
     load()
-  }, [])
+  }, [user])
 
   return (
     <main>
       <h1>問い合わせ管理</h1>
+
+      <SignIn onChange={setUser} />
 
       <h2>問い合わせの登録</h2>
 
@@ -195,7 +201,8 @@ export default function App() {
         ))}
       </ul>
 
-      <Assistant />
+      {/* key を利用者の ID にして、利用者を切り替えたらアシスタントの表示を作り直す */}
+      <Assistant key={user?.id ?? 'none'} user={user} />
     </main>
   )
 }
