@@ -135,6 +135,9 @@ class MockProvider:
       bad_tool_args   : ステータスの変更で、決まりにない値（「解決済み」）を引数に入れる
       unknown_tool    : 定義にないツール（delete_inquiry）を要求する
       tool_loop       : ツールの結果を受け取っても、同じ検索を要求し続ける（止まらない）
+    エージェントの失敗（コマ13）
+      error_loop      : 毎回違う、存在しない問い合わせの ID で get_inquiry を要求し続ける（エラーが続く）
+      ignore_scope    : 渡されていない更新のツールも要求する（モデルが範囲を守らない）
     """
 
     def __init__(self):
@@ -211,6 +214,7 @@ class MockProvider:
 
           - 「…」で囲んだ言葉があり、「探して」「検索」などがあれば → search_inquiries
           - 問い合わせの ID（UUID）と「対応中」「完了」があれば → update_inquiry_status
+          - 「…」の言葉と「すべて」と「対応中」か「完了」があれば → 検索し、見つかったものを1件ずつ更新する（コマ13）
           - 最後のメッセージがツールの結果なら → 結果をまとめた答えの文を返す
         """
         self._maybe_fail(model, messages)
@@ -220,6 +224,11 @@ class MockProvider:
         if last["role"] == "tool":
             if self.fault == "tool_loop":
                 return _mock_call("search_inquiries", {"keyword": "VPN"})
+            if self.fault == "error_loop":
+                return _mock_call("get_inquiry", {"inquiry_id": f"00000000-0000-4000-8000-{next(_call_ids):012d}"})
+            following = _mock_next_update(messages, names, self.fault == "ignore_scope")
+            if following:
+                return following
             return {"content": _mock_summary(messages), "tool_calls": []}
 
         text = last["content"]
@@ -233,8 +242,11 @@ class MockProvider:
             if status:
                 return _mock_call("update_inquiry_status", {"inquiry_id": found.group(0), "status": status})
         quoted = re.search(r"「(.+?)」", text)
-        if quoted and any(w in text for w in ("探", "検索", "調べ", "一覧", "ある")) and "search_inquiries" in names:
-            return _mock_call("search_inquiries", {"keyword": quoted.group(1)[:50]})
+        if quoted and any(w in text for w in ("探", "検索", "調べ", "一覧", "ある", "すべて")) and "search_inquiries" in names:
+            arguments = {"keyword": quoted.group(1)[:50]}
+            if "未対応" in text:
+                arguments["status"] = "未対応"
+            return _mock_call("search_inquiries", arguments)
         return {
             "content": "（モックLLMの応答）ツールを使わずに答える。問い合わせを探すときは、言葉を「」で囲んで"
             "「探して」と書く。ステータスを変えるときは、問い合わせの ID と「対応中」か「完了」を書く。",
@@ -249,6 +261,29 @@ def _check_tool_messages(model, messages):
             answered = {x.get("tool_call_id") for x in messages[i + 1 :] if x["role"] == "tool"}
             if any(c["id"] not in answered for c in m["tool_calls"]):
                 raise LLMError(f"モデルを呼べなかった（HTTP 400・モック・{model}: ツールの要求に対応する結果がない）")
+
+
+def _mock_next_update(messages, names, ignore_scope):
+    """「すべて…にして」の依頼で、検索の結果のうち、まだ更新を要求していない1件の更新を要求する（コマ13）"""
+    start = max(i for i, m in enumerate(messages) if m["role"] == "user")
+    text = messages[start]["content"]
+    status = "完了" if "「完了」" in text else "対応中" if "「対応中」" in text else None
+    if "すべて" not in text or status is None:
+        return None
+    if "update_inquiry_status" not in names and not ignore_scope:
+        return None
+    found, requested = [], set()
+    for m in messages[start + 1 :]:
+        if m["role"] == "tool":
+            found += [i["id"] for i in json.loads(m["content"]).get("items", [])]
+        elif m.get("tool_calls"):
+            for c in m["tool_calls"]:
+                if c["function"]["name"] == "update_inquiry_status":
+                    requested.add(json.loads(c["function"]["arguments"])["inquiry_id"])
+    for inquiry_id in found:
+        if inquiry_id not in requested:
+            return _mock_call("update_inquiry_status", {"inquiry_id": inquiry_id, "status": status})
+    return None
 
 
 def _mock_call(name, arguments):
@@ -275,6 +310,8 @@ def _mock_summary(messages):
             parts.append(f"{result['count']} 件見つかった: {titles}" if result["items"] else "見つからなかった")
         elif "after" in result:
             parts.append(f"「{result['title']}」のステータスを {result['before']} から {result['after']} にした")
+        elif "title" in result:
+            parts.append(f"「{result['title']}」の状態は {result['status']} である")
     return "（モックLLMの応答）" + " ／ ".join(parts)
 
 

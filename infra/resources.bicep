@@ -32,6 +32,8 @@
 //   - 画面の認証（Static Web Apps の組み込み認証）は、app/public/staticwebapp.config.json で設定する（ここには書かない）
 //
 // コマ12: 構成の変更はない（ツールを使うアシスタントの API が増え、ツールが問い合わせのデータを読み書きするだけ）
+//
+// コマ13: 構成の変更はない（MCP サーバーは、既存の Functions の HTTP の関数 /api/mcp として公開する）
 // =====================================================================
 param location string
 param webLocation string

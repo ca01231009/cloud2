@@ -13,6 +13,7 @@
   GET  /api/conversations?id=...  会話の履歴を返す（コマ7。画面を開き直したときに使う）
   GET  /api/conversations/list?user=...  会話の一覧を返す（コマ11）
   POST /api/assist      ツールを使うアシスタント（コマ12。問い合わせの検索・ステータスの変更）  {"message": "..."}
+  POST /api/mcp         MCP サーバー（コマ13。JSON-RPC のメッセージを受け取る）
   POST /api/inquiries/classify?id=...  問い合わせを AI で分類し、担当に振り分ける（コマ8）
                         コマ9から、キャッシュ・再試行・フォールバック・呼ぶ回数の上限を加えた
   POST /api/jobs/classify  未対応の問い合わせをまとめて分類するジョブを始める（コマ10。すぐ 202 を返す）
@@ -43,7 +44,7 @@ import azure.functions as func
 from azure.cosmos import CosmosClient
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from azure.identity import DefaultAzureCredential
-from azurefunctions.extensions.http.fastapi import JSONResponse, Request, StreamingResponse
+from azurefunctions.extensions.http.fastapi import JSONResponse, Request, Response, StreamingResponse
 
 import auth
 import authz
@@ -52,6 +53,7 @@ import conversations
 import jobs
 import llm
 import llm_cache
+import mcp_server
 import resilience
 import tools
 from history import trim_history
@@ -538,6 +540,38 @@ async def assist(req: Request) -> JSONResponse:
             {"error": str(e), "callLog": getattr(e, "call_log", []), "steps": getattr(e, "steps", [])}, status_code=503
         )
     return JSONResponse(result)
+
+
+# =====================================================================
+# MCP サーバー（コマ13）
+# =====================================================================
+@app.route(route="mcp", methods=["POST"])
+async def mcp(req: Request) -> JSONResponse:
+    # ブラウザから来た要求（Origin ヘッダーがある）は断る。DNS リバインディング攻撃を防ぐため（MCP の仕様の決まり）
+    if req.headers.get("origin"):
+        return JSONResponse({"error": "この Origin からの要求は許可していない"}, status_code=403)
+    try:
+        principal = authenticate(req)  # ツールは、トークンの利用者の権限で実行する
+    except authz.AuthError as e:
+        return auth_error(e)
+    try:
+        message = await req.json()
+    except ValueError:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "JSON の形式が正しくない"}},
+            status_code=400,
+        )
+    try:
+        mcp_server.check_headers(message, req.headers)
+    except mcp_server.RpcError as e:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": message.get("id"), "error": {"code": e.code, "message": e.message}},
+            status_code=400,
+        )
+    response = mcp_server.handle(message, principal, tools.CosmosInquiryRepo(get_inquiries()))
+    if response is None:
+        return Response(status_code=202)  # 通知を受け付けた（本文なし）
+    return JSONResponse(response)
 
 
 # =====================================================================

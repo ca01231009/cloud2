@@ -1,4 +1,4 @@
-"""ツール呼び出し（コマ12）
+"""ツール呼び出し（コマ12。コマ13で get_inquiry を追加し、MCP サーバーからも使う）
 
 LLM は関数を実行しない。「この関数を、この引数で呼びたい」という**要求**（tool_calls）を返すだけである。
 実際に関数を実行するのは、このアプリである。だから、次の3つはアプリの責任になる。
@@ -45,10 +45,18 @@ class UpdateStatusArgs(BaseModel):
         pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         description="問い合わせの ID（search_inquiries の結果の id）",
     )
-    # TODO(コマ12 演習手順4): status に入れてよい値を「対応中」「完了」の2つだけにする。
-    #   型を str から Literal["対応中", "完了"] に変え、Field(description="…") で、モデル向けの説明を付ける。
-    #   いまは、どんな文字列でも受け付ける（スキーマにも、選んでよい値が書かれない）。
-    status: str
+    status: Literal["対応中", "完了"] = Field(description="変えた後のステータス（対応中・完了のどちらか）")
+
+
+class GetInquiryArgs(BaseModel):
+    """get_inquiry の引数"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    inquiry_id: str = Field(
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        description="問い合わせの ID（search_inquiries の結果の id）",
+    )
 
 
 @dataclass
@@ -57,6 +65,7 @@ class Tool:
     description: str
     args_model: type
     run: Callable  # run(args, principal, repo) -> 結果の辞書
+    read_only: bool = False  # データを変えないツールか（MCP の注釈 readOnlyHint に使う）
 
 
 def schema_of(args_model):
@@ -95,12 +104,24 @@ def run_search(args, principal, repo):
     }
 
 
+def run_get_inquiry(args, principal, repo):
+    """問い合わせ1件の詳細を返す。担当者はすべて、それ以外は自分が登録したものだけ（他人のものは「ない」とする）"""
+    authz.require_user(principal)
+    item = repo.get(args.inquiry_id)
+    if item is None or (authz.STAFF not in principal.roles and item.get("createdBy") != principal.user_id):
+        raise authz.NotFound("その ID の問い合わせはない")
+    return {
+        "id": item["id"],
+        "title": item["title"],
+        "body": item.get("body", ""),
+        "status": item["status"],
+        "assignee": item.get("assignee"),
+    }
+
+
 def run_update_status(args, principal, repo):
     """問い合わせのステータスを変える（担当者だけ）"""
-    # TODO(コマ12 演習手順5-2): 担当者（staff）でなければ断る。
-    #   authz.require_role(principal, authz.STAFF) を呼ぶ（Forbidden が出る。execute_tool が結果に変える）。
-    #   いまは、サインインさえしていれば、誰の依頼でも、モデルが呼べばステータスが変わる。
-    authz.require_user(principal)
+    authz.require_role(principal, authz.STAFF)
     item = repo.get(args.inquiry_id)
     if item is None:
         raise authz.NotFound("その ID の問い合わせはない")
@@ -118,6 +139,14 @@ TOOLS = {
             "ステータスを変える前に、対象の問い合わせの ID を調べるのにも使う。",
             SearchArgs,
             run_search,
+            read_only=True,
+        ),
+        Tool(
+            "get_inquiry",
+            "問い合わせ1件の詳細（本文・状態・担当）を返す。ID は search_inquiries で調べたものを使う。",
+            GetInquiryArgs,
+            run_get_inquiry,
+            read_only=True,
         ),
         Tool(
             "update_inquiry_status",
@@ -139,12 +168,10 @@ def execute_tool(name, arguments, principal, repo, tools=TOOLS):
     if tool is None:
         return {"error": f"{name} というツールはない"}
 
-    # TODO(コマ12 演習手順5-1): 引数を検証する。
-    #   json.loads(arguments) と tool.args_model.model_validate(…) で、JSON として読めるか・スキーマに合うかを確かめる。
-    #   読めない（ValueError）・合わない（ValidationError）ときは、ツールを実行せずに
-    #   {"error": "引数が正しくない: …"} を返す。
-    #   いまは model_construct（検証しないで作る）を使っているので、決まりに合わない値でも、そのまま実行される。
-    args = tool.args_model.model_construct(**json.loads(arguments))
+    try:
+        args = tool.args_model.model_validate(json.loads(arguments))
+    except (ValueError, ValidationError) as e:
+        return {"error": f"引数が正しくない: {e}"}
 
     try:
         return tool.run(args, principal, repo)
@@ -188,9 +215,9 @@ def run_tool_loop(messages, call_model, execute, max_steps, steps=None):
         for call in calls:
             result = execute(call["name"], call["arguments"])
             steps.append({"tool": call["name"], "arguments": call["arguments"], "result": result})
-            # TODO(コマ12 演習手順6): ツールの結果を、tool のメッセージとして messages に加える。
-            #   {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)}
-            #   いまは結果をモデルに返していないので、モデルは結果を知らないまま、次の応答を求められる。
+            messages.append(
+                {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)}
+            )
 
     return f"ツールを使う回数の上限（{max_steps}回）に達したので、ここで止めた", steps
 
