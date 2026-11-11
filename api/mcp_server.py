@@ -61,10 +61,9 @@ def tool_result(result):
     ツールの実行の失敗（引数の誤り・権限がない など）は、プロトコルのエラーではなく、
     結果の isError を true にして返す。モデルがそれを読んで、自分で直せるようにするためである。
     """
+    if "error" in result:
+        return {"resultType": "complete", "content": [{"type": "text", "text": result["error"]}], "isError": True}
     text = json.dumps(result, ensure_ascii=False)
-    # TODO(コマ13 演習手順4): ツールが失敗したことを、クライアントに正しく伝える。
-    #   result に "error" があるときは、isError を True にし、structuredContent は付けない。content の text には result["error"] を入れる。
-    #   いまは、失敗も成功として返している（クライアントは失敗に気づけない）。
     return {
         "resultType": "complete",
         "content": [{"type": "text", "text": text}],

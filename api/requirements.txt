@@ -5,3 +5,4 @@ azure-identity
 openai
 pydantic
 azure-storage-queue
+azure-search-documents

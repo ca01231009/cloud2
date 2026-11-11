@@ -5,6 +5,7 @@
 //   - Storage                       : Functions の動作とデプロイに使う
 //   - Cosmos DB（Free tier）        : 問い合わせのデータ
 //   - Key Vault（Standard）         : OpenRouter のキーを保管する（コマ6で追加）
+//   - AI Search（Free）             : 文書の検索（コマ14で追加）
 //
 // コマ6で追加したもの
 //   - Key Vault と、Key Vault に対するロールの割り当て（Functions: 読むだけ／自分: 書き込み）
@@ -34,6 +35,10 @@
 // コマ12: 構成の変更はない（ツールを使うアシスタントの API が増え、ツールが問い合わせのデータを読み書きするだけ）
 //
 // コマ13: 構成の変更はない（MCP サーバーは、既存の Functions の HTTP の関数 /api/mcp として公開する）
+//
+// コマ14で追加したもの
+//   - Azure AI Search（Free）と、ロールの割り当て（Functions: 検索だけ／自分: インデックスの作成と文書の投入）
+//   - アプリ設定: AZURE_SEARCH_ENDPOINT、AZURE_SEARCH_INDEX、EMBEDDING_PROVIDER
 // =====================================================================
 param location string
 param webLocation string
@@ -50,6 +55,7 @@ var jobsContainerName = 'jobs'
 var jobQueueName = 'classify-jobs'
 var deploymentContainerName = 'deploymentpackage'
 var openRouterSecretName = 'openrouter-api-key'
+var searchIndexName = 'kamome-docs'
 var authSigningKeySecretName = 'auth-signing-key' // 利用者トークンの署名の鍵（コマ11。値は lesson11/enable-dev-login.sh が書き込む）
 
 // 組み込みロールの ID（ロールの名前ではなく、Azure 全体で決まっている ID で指定する）
@@ -57,6 +63,9 @@ var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6' // Key Va
 var keyVaultSecretsOfficerRoleId = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7' // Key Vault Secrets Officer（シークレットを書く）
 var cosmosDataContributorRoleId = '00000000-0000-0000-0000-000000000002' // Cosmos DB Built-in Data Contributor（データを読み書きする）
 var storageQueueDataContributorRoleId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88' // Storage Queue Data Contributor（キューのメッセージを読み書きする）
+var searchIndexDataReaderRoleId = '1407120a-92aa-4202-b7e9-c0e197c71c8f' // Search Index Data Reader（インデックスを検索する）
+var searchIndexDataContributorRoleId = '8ebe5a00-799e-43f5-93ac-243d3dce84a7' // Search Index Data Contributor（文書を投入する）
+var searchServiceContributorRoleId = '7ca78c08-252a-4471-8644-bb5ff32d4ba0' // Search Service Contributor（インデックスを作る）
 
 // ---------------------------------------------------------------------
 // Static Web Apps（Free）: React で作った画面を配信する
@@ -224,6 +233,27 @@ resource jobsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/conta
 }
 
 // ---------------------------------------------------------------------
+// Azure AI Search（Free）: 文書の全文検索とベクトル検索（コマ14）
+//   Free は1サブスクリプションに1つだけ。API キーを使わず、ロールの割り当てで接続する
+//   aadOrApiKey: Microsoft Entra ID のトークン（マネージドID・自分のサインイン）でも接続できるようにする
+// ---------------------------------------------------------------------
+resource search 'Microsoft.Search/searchServices@2025-05-01' = {
+  name: 'srch-${resourceToken}'
+  location: location
+  tags: tags
+  sku: {
+    name: 'free'
+  }
+  properties: {
+    authOptions: {
+      aadOrApiKey: {
+        aadAuthFailureMode: 'http401WithBearerChallenge'
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
 // Functions（Flex Consumption・Python）: API
 // ---------------------------------------------------------------------
 resource plan 'Microsoft.Web/serverfarms@2024-04-01' = {
@@ -331,6 +361,20 @@ resource api 'Microsoft.Web/sites@2024-04-01' = {
           name: 'DEV_LOGIN_ENABLED'
           value: 'false'
         }
+        // 検索（コマ14）: 接続先とインデックスの名前。キーは使わず、マネージドIDで接続する
+        {
+          name: 'AZURE_SEARCH_ENDPOINT'
+          value: 'https://${search.name}.search.windows.net'
+        }
+        {
+          name: 'AZURE_SEARCH_INDEX'
+          value: searchIndexName
+        }
+        // 質問の埋め込みの作り方（mock: モック埋め込み／openrouter: 本物）。既定はモック（費用がかからない）
+        {
+          name: 'EMBEDDING_PROVIDER'
+          value: 'mock'
+        }
         // LLM の呼び先（mock: モックLLM／openrouter: 本物）。既定はモック（共有の利用上限を消費しない）
         {
           name: 'LLM_PROVIDER'
@@ -385,6 +429,38 @@ resource userStorageQueueContributor 'Microsoft.Authorization/roleAssignments@20
   scope: storage
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageQueueDataContributorRoleId)
+    principalId: principalId
+    principalType: 'User'
+  }
+}
+
+// Functions のマネージドIDに「検索する」権限だけを与える（コマ14）。文書の変更はできない
+resource apiSearchReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(search.id, api.id, searchIndexDataReaderRoleId)
+  scope: search
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', searchIndexDataReaderRoleId)
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// 自分（azd を実行した人）に、インデックスを作り、文書を投入する権限を与える（コマ14）
+resource userSearchServiceContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(principalId)) {
+  name: guid(search.id, principalId, searchServiceContributorRoleId)
+  scope: search
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', searchServiceContributorRoleId)
+    principalId: principalId
+    principalType: 'User'
+  }
+}
+
+resource userSearchIndexContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(principalId)) {
+  name: guid(search.id, principalId, searchIndexDataContributorRoleId)
+  scope: search
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', searchIndexDataContributorRoleId)
     principalId: principalId
     principalType: 'User'
   }
@@ -455,3 +531,5 @@ output webUrl string = 'https://${web.properties.defaultHostname}'
 output functionName string = api.name
 output keyVaultName string = keyVault.name
 output storageAccountName string = storage.name
+output searchEndpoint string = 'https://${search.name}.search.windows.net'
+output searchIndexName string = searchIndexName

@@ -16,6 +16,7 @@
   "max_job_items": 20,
   "history_token_budget": 1500,
   "max_history_messages": 40,
+  "embedding_model": "set-by-teacher/embedding-model",
   "tool_model": "google/gemma-4-31b-it:free",
   "tool_fallback_models": [],
   "max_tool_steps": 4,

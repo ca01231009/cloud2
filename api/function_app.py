@@ -14,6 +14,7 @@
   GET  /api/conversations/list?user=...  会話の一覧を返す（コマ11）
   POST /api/assist      ツールを使うアシスタント（コマ12。問い合わせの検索・ステータスの変更）  {"message": "..."}
   POST /api/mcp         MCP サーバー（コマ13。JSON-RPC のメッセージを受け取る）
+  POST /api/search      文書を検索する（コマ14）  {"query": "...", "mode": "keyword|vector|hybrid"}
   POST /api/inquiries/classify?id=...  問い合わせを AI で分類し、担当に振り分ける（コマ8）
                         コマ9から、キャッシュ・再試行・フォールバック・呼ぶ回数の上限を加えた
   POST /api/jobs/classify  未対応の問い合わせをまとめて分類するジョブを始める（コマ10。すぐ 202 を返す）
@@ -50,6 +51,8 @@ import auth
 import authz
 import classification
 import conversations
+import doc_search
+import embedding
 import jobs
 import llm
 import llm_cache
@@ -572,6 +575,44 @@ async def mcp(req: Request) -> JSONResponse:
     if response is None:
         return Response(status_code=202)  # 通知を受け付けた（本文なし）
     return JSONResponse(response)
+
+
+# =====================================================================
+# 文書の検索（コマ14）
+# =====================================================================
+def get_search_client():
+    """AI Search に接続する。キーではなく、マネージドIDで接続する（Search Index Data Reader のロール）"""
+    from azure.search.documents import SearchClient
+
+    return SearchClient(
+        os.environ["AZURE_SEARCH_ENDPOINT"], os.environ["AZURE_SEARCH_INDEX"], DefaultAzureCredential()
+    )
+
+
+@app.route(route="search", methods=["POST"])
+async def search_documents(req: Request) -> JSONResponse:
+    try:
+        authenticate(req)
+    except authz.AuthError as e:
+        return auth_error(e)
+    try:
+        data = await req.json()
+    except ValueError:
+        return JSONResponse({"error": "JSON の形式が正しくない"}, status_code=400)
+    query = str(data.get("query", "")).strip()
+    mode = data.get("mode", "hybrid")
+    if not query or len(query) > MAX_MESSAGE or mode not in doc_search.MODES:
+        return JSONResponse({"error": "検索の言葉か、検索の種類が正しくない"}, status_code=400)
+
+    try:
+        vector = None if mode == "keyword" else await asyncio.to_thread(embedding.embed_query, query)
+        hits = await asyncio.to_thread(doc_search.run_search, get_search_client(), mode, query, vector, 3)
+    except embedding.EmbeddingError as e:
+        return JSONResponse({"error": str(e)}, status_code=503)
+    except Exception:  # noqa: BLE001
+        logging.exception("検索に失敗した")
+        return JSONResponse({"error": "検索に失敗した（ロールが行き渡っていない可能性がある）"}, status_code=503)
+    return JSONResponse({"mode": mode, "hits": hits})
 
 
 # =====================================================================

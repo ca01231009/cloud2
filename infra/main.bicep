@@ -28,7 +28,7 @@ param principalId string = ''
 var tags = {
   'azd-env-name': environmentName
   course: 'cloud2'
-  lesson: '13'
+  lesson: '14'
 }
 
 // リソース名の重複を避けるための短い文字列（同じ環境名・場所なら毎回同じ値になる）
@@ -61,3 +61,5 @@ output WEB_URL string = resources.outputs.webUrl
 output AZURE_FUNCTION_NAME string = resources.outputs.functionName
 output KEY_VAULT_NAME string = resources.outputs.keyVaultName
 output AZURE_STORAGE_ACCOUNT_NAME string = resources.outputs.storageAccountName
+output AZURE_SEARCH_ENDPOINT string = resources.outputs.searchEndpoint
+output AZURE_SEARCH_INDEX string = resources.outputs.searchIndexName

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import Assistant from './Assistant.jsx'
 import ToolAssistant from './ToolAssistant.jsx'
+import DocSearch from './DocSearch.jsx'
 import SignIn from './SignIn.jsx'
 import { apiFetch, getSession } from './api.js'
 
@@ -202,6 +203,9 @@ export default function App() {
           </li>
         ))}
       </ul>
+
+      {/* 社内文書の検索（コマ14） */}
+      <DocSearch user={user} />
 
       {/* ツールを使うアシスタント（コマ12）。ツールが問い合わせを変えたら、一覧を読み直す */}
       <ToolAssistant key={`tool-${user?.id ?? 'none'}`} user={user} onChanged={load} />

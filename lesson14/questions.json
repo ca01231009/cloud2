@@ -1,0 +1,9 @@
+[
+  {"question": "会社を休むときの手続き", "kind": "言い換え", "expect": "有給休暇"},
+  {"question": "パソコンを持ち帰りたい", "kind": "言い換え", "expect": "持ち出し申請書"},
+  {"question": "不審なメールが届いた", "kind": "言い換え", "expect": "怪しいメール"},
+  {"question": "E-4021", "kind": "型番", "expect": "E-4021"},
+  {"question": "エラー 809", "kind": "番号", "expect": "エラー 809"},
+  {"question": "K-12", "kind": "型番", "expect": "K-12"},
+  {"question": "経費精算の締め切り", "kind": "そのままの言葉", "expect": "毎月25日"}
+]
